@@ -1,6 +1,6 @@
 # How Hush works
 
-This guide explains the audio engine inside `index.html`: how sounds are scheduled, how each one is synthesized, how they are placed in 3D, and how to add a new one. It assumes some familiarity with JavaScript and basic signal processing (filters, spectra, envelopes).
+This guide explains the audio engine of Hush: how sounds are scheduled, how each one is synthesized, how they are placed in 3D, and how to add a new one. It assumes some familiarity with JavaScript and basic signal processing (filters, spectra, envelopes).
 
 ## Contents
 
@@ -15,6 +15,10 @@ This guide explains the audio engine inside `index.html`: how sounds are schedul
 9. [Spatial audio](#9-spatial-audio)
 10. [Master bus and lifecycle](#10-master-bus-and-lifecycle)
 11. [Layout and navigation](#11-layout-and-navigation)
+    - [Your sounds](#11b-your-sounds)
+    - [Room reverb](#11c-room-reverb)
+    - [Scenes, sharing and Surprise me](#11d-scenes-sharing-and-surprise-me)
+    - [Sleep timer, recording, phones](#11e-sleep-timer-recording-phones)
 12. [The head map](#12-the-head-map)
 13. [Adding a new sound](#13-adding-a-new-sound)
 14. [Tuning and troubleshooting](#14-tuning-and-troubleshooting)
@@ -29,17 +33,20 @@ That split is what keeps the app smooth: all the "musical" decisions are made in
 
 ## 2. Code map
 
-Everything lives in the `<script>` block at the bottom of `index.html`, in five sections.
+The page markup is in `index.html`, the styles in `css/style.css`, and the code in eight plain scripts in `js/`, loaded in this order. They are ordinary scripts, not modules, so they share one global scope and the page still runs from a double-clicked file; a later file may use anything an earlier one defines.
 
-**Helpers and buffers.** Globals (`ctx`, `master`, `WHITE`, `BROWN`), small helpers (`rand`, `pick`, `expRand`, `bq` for filters, `gn` for gains), the noise generators `makeNoise` and `colorNoise`, and the event helpers `loop` and `burst`.
+| File | Contents |
+|---|---|
+| `engine.js` | Globals (`ctx`, `master`, `WHITE`, `BROWN`), helpers (`rand`, `pick`, `expRand`, `bq` for filters, `gn` for gains, `el` for DOM elements), noise and coloured-noise buffers, `loop`, `burst`, `bakeBank`, `tone`, `oneShot`, the per-sound filter maths (section 7) and the room reverb (section 11c) |
+| `analysis.js` | Your sounds: the FFT, `analyseAudio`, `bakeCopy` and `loadUserSound` (section 11b) |
+| `sounds.js` | The music helpers (keys, scales, `modalStrike`, Karplus–Strong), the offline `BAKE` recipes, the phonetic tables and `GEN`, with one generator per sound (section 6) |
+| `sources.js` | `GROUPS` and `DEFS` (every sound's name, section, defaults and controls), the `Voice` class, the scheduler `tick`, `makeClock` and `initAudio` |
+| `map.js` | The head map: drawing, dragging and on-demand redraws (section 12) |
+| `ui.js` | `rangeCtrl` and `selectCtrl`, the filter plot, the Section menu, the Instruments key and scale, the sound cards and the Your sounds panel |
+| `patterns.js` | Register pattern: recording, generators, links, and the Now playing section (section 8) |
+| `app.js` | Transport (`startPlayback`, `pausePlayback`), lock-screen controls, sleep timer, recording, room selector, scenes, Surprise me, Chaos mode and the installable app (sections 11d and 11e) |
 
-**Sound generators (`GEN`).** One object per sound, keyed by id: `rain`, `tap`, `brush`, `fire`, `noise`, `whisper`. Each has `build(v)` to create persistent nodes, `schedule(v, t1)` to create timed events up to time `t1`, and optionally `update(v, key)` to react to a slider change while playing. Constant tables sit just above: `MATERIALS`, `VOWELS`, `CONS`.
-
-**Sources (`DEFS`, `Voice`, `tick`, `initAudio`).** `DEFS` describes each source for the UI: name, colour, description, default parameters and extra controls. `Voice` is one playing source: its parameters `p`, its spatial path `pos(t)`, and `start`, `stop`, `schedulePos`. `tick` is the scheduler loop; `initAudio` creates the context, master bus, buffers and clock.
-
-**UI.** `rangeCtrl` and `selectCtrl` build controls bound to `v.p[key]`. The loop over `voices` builds one panel per source. The play button handles start, pause and resume.
-
-**Head map.** `draw()` renders the top-down view on a canvas every animation frame.
+Each generator in `GEN` has `build(v)` to create persistent nodes, `schedule(v, t1)` to create timed events up to time `t1`, and optionally `update(v, key)` to react to a setting changing while it plays.
 
 ## 3. Signal chain
 
@@ -274,37 +281,26 @@ Events come in groups of 2–6, 70–270 ms apart, with longer pauses between gr
 
 ### Whispering
 
-Speech can be described by the source-filter model. A source (the glottis) produces an excitation, and the vocal tract filters it. The resonances of the tract are the formants, conventionally F1, F2 and F3, and their positions determine which vowel we hear. In voiced speech the source is a periodic pulse train. In a whisper the vocal folds don't vibrate and the source is turbulent noise. So a whisper is, to a good approximation, noise through formant filters.
+Speech follows the source-filter model: a source (the glottis) is shaped by the vocal tract, whose resonances (formants F1–F4) decide which vowel we hear. In a whisper the vocal folds don't vibrate, so the source is turbulent noise.
 
-**Vowel path.** One looped noise source feeds three parallel bandpass filters, one per formant, plus a broad 1.1 kHz "air" layer. They are summed into a vowel gain `v.vg`, then darkened by a 3.6 kHz lowpass and a −5 dB high-shelf.
+**Vocal tract.** Looped white noise goes through a 4th-order Butterworth high-pass at 450 Hz (Q 0.541 and 1.307), then a cascade of four peaking filters at the formants, a vowel gain and a gentle 8 kHz low-pass. The peaks lift the formants 6 dB (F1), 12 dB (F2), 10 dB (F3) and 6 dB (F4, near 3.7 kHz) above a breathy floor, with bandwidths of 300, 250, 350 and 500 Hz, which are wide, as in whispers.
 
-| Vowel | F1 | F2 | F3 |
-|---|---|---|---|
-| /a/ | 800 | 1200 | 2600 |
-| /e/ | 550 | 1900 | 2600 |
-| /i/ | 320 | 2400 | 3100 |
-| /o/ | 600 | 900 | 2500 |
-| /u/ | 350 | 850 | 2300 |
+An earlier version used parallel band-pass filters with nothing between the peaks, strong F1 and a 3.6 kHz low-pass. That put 54% of the energy below 1 kHz and 18% below 450 Hz, which, especially with the proximity bass boost, sounded like a growling creature. Measured in the browser, the current model puts under 2% of its energy below 450 Hz and about half between 2 and 4 kHz, with a spectral centroid near 2.8 kHz, close to the long-term spectrum of real whispered speech.
 
-Values are in hertz, slightly raised compared with voiced speech, as is typical for whispers. The filters use low Q (3.5, 4.5, 5). Narrow formant filters on noise produce a whistling tone, which is exactly what makes a synthetic whisper sound harsh.
+**Vowels.** Seven vowel targets with slightly raised whisper formants, drawn with weights: the reduced vowel schwa (ə) is the most frequent, as in real speech, which avoids the "wah-wah" of constantly jumping between extreme vowels. Formants glide to each target with a 45 ms time constant and drift by a few percent inside the vowel.
 
-**Consonants** don't use the formant bank. They are separate bursts, each through its own permanent bandpass filter (created once in `build`), then a softening lowpass at 6 kHz:
+**Consonants.** Each syllable has an onset and, 35% of the time, a coda:
 
-| Consonant | Implementation |
+| Sound | Model |
 |---|---|
-| s | 100–180 ms burst, bandpass 5 kHz, Q 1.2, soft attack |
-| sh | same, bandpass 2.4 kHz |
-| f | same, broad bandpass 3.5 kHz |
-| t, k | 40 ms burst with 8 ms attack, bandpass 3.2 kHz or 1.6 kHz, very quiet |
-| h | no burst; the following vowel fades in more slowly |
+| s, sh, f | held noise through their own filters: s 4–9 kHz (peak 6.5 kHz), sh 2–5 kHz (peak 3.2 kHz), f weak and flat above 1.5 kHz |
+| t, k, p | 35 ms closure, a 12 ms release burst (high for t, mid for k, low for p), then aspiration through the vowel's formants |
+| h | aspiration through the vowel's formants before the vowel |
+| m, n, l, w | faint whispered murmur with low formants, gliding into the vowel |
 
-**A syllable** is an optional consonant followed by a vowel. For the vowel, the three formant frequencies glide towards the new targets with `setTargetAtTime` (a first-order exponential approach with a 30 ms time constant, which mimics articulators moving). The vowel gain rises towards a random level with a 35 ms time constant (70 ms after "h") and decays with a 60 ms time constant near the end. The vowel lasts 160–320 ms, divided by the "Pace" slider.
+**Prosody.** Words have one to three syllables with one stressed syllable, which is longer (140–210 ms) and louder than the unstressed ones (75–125 ms). Words mostly run together with short gaps, phrases of 4–9 words get softer towards the end (declination), and between phrases there is a pause with an audible inhale. Occasionally a tiny click marks the lips parting. At the default pace this gives about 3.3 syllables per second, a natural speaking rate. "Voice size" scales all formants (1.08 by default, a slightly smaller tract).
 
-**Prosody** comes from a small state machine above the syllables: 1–3 syllables form a word, words are separated by 250–650 ms pauses, and 3–5 words form a phrase. Every phrase starts with a breath, a 1.1 s swell of noise around 1.2 kHz with a slow attack, followed by a pause of 1.6–3 s.
-
-The "Voice size" slider multiplies all formant frequencies. A longer vocal tract has lower resonances, so values below 1 sound like a larger person.
-
-The result is deliberately unintelligible, a style known in ASMR as inaudible whispering. Real words need a different approach; see the README for ideas.
+The result is still wordless: it has the sound and rhythm of speech without meaning, which is the "inaudible whispering" style of ASMR.
 
 ## 7. Per-source filter
 
@@ -478,7 +474,7 @@ For the noise source in "All around" mode, `Voice.start` connects the input stra
 
 ## 10. Master bus and lifecycle
 
-All voices sum into a master gain (the page's volume slider) followed by a `DynamicsCompressorNode` (threshold −18 dB, ratio 4:1, attack 5 ms, release 200 ms). Random events occasionally line up into peaks; the compressor keeps them from clipping.
+All voices sum into a master gain (the page's volume slider), then the sleep-timer fade gain, then a `DynamicsCompressorNode` (threshold −18 dB, ratio 4:1, attack 5 ms, release 200 ms). Random events occasionally line up into peaks; the compressor keeps them from clipping.
 
 **Starting a voice.** `Voice.start()` creates fresh node lists, builds the input gain, the four filter stages, shelf and panner, fades the input gain up to the voice volume, sets the initial position, sets `next` 100 ms into the future, and calls the generator's `build`.
 
@@ -486,11 +482,11 @@ All voices sum into a master gain (the page's volume slider) followed by a `Dyna
 
 **Live changes.** Volume changes use `setTargetAtTime` with a 50 ms time constant. Setting a parameter value instantly would produce "zipper noise". Other sliders simply update `v.p`; the scheduler reads the new value on its next pass, and generators with an `update` method apply changes to running nodes immediately.
 
-**Pause and resume** use `ctx.suspend()` and `ctx.resume()`, which freeze the audio clock. The scheduler checks `ctx.state` and does nothing while suspended.
+**Pause and resume** go through `startPlayback()` and `pausePlayback()`, which use `ctx.resume()` and `ctx.suspend()` (freezing the audio clock), start and stop the scheduler clock, and keep the button, the lock-screen controls and any recording in step. The play button, the lock-screen controls, Surprise me, scene Play buttons and the sleep timer all call these two functions.
 
 ## 11. Layout and navigation
 
-The list starts with **Now playing**, followed by the sound sections, Ambience (noise colours, rain, fire, water drops), Touch and objects (tapping, brushing, squishy, crinkles and cracks), Animals (birds, crickets, cat purring, frogs), Instruments (singing bowl, kalimba, harp, wind chimes, warm pad) and Mouth and voice (mouth sounds, whispering), and ends with Patterns. The sections come from the `GROUPS` table, and each entry in `DEFS` names its group. The Instruments section also holds the shared Key and Scale selectors.
+The list starts with **Now playing**, followed by the sound sections, Ambience (noise colours, rain, fire, water drops), Touch and objects (tapping, brushing, squishy, crinkles and cracks), Animals (birds, crickets, cat purring, frogs), Instruments (singing bowl, kalimba, harp, wind chimes, warm pad), Mouth and voice (mouth sounds, whispering) and Your sounds (three slots for your own files), and ends with Patterns. The sections come from the `GROUPS` table, and each entry in `DEFS` names its group. The Instruments section also holds the shared Key and Scale selectors.
 
 A **Section** menu sticks to the top of the list, and only the chosen section is shown; the others are hidden with the `hidden` attribute. The page opens on Now playing. A small green dot marks every section in which something is playing (a sound switched on, or for Patterns, a pattern running), and the menu button carries the dot of the section currently shown.
 
@@ -501,6 +497,79 @@ The menu is a custom dropdown rather than a native `<select>`, because option el
 Each sound card shows its name and switch (the description appears as a tooltip on the name), while its controls and filter sit in a collapsible **Settings** block that starts open only for sounds that are on.
 
 The page was checked in headless Chromium at 360, 768 and 1280 px wide: nothing extends past the screen edge, there are no console errors, and the menu works with mouse and keyboard. The body uses `overflow-x: clip` as a safety net; `overflow-x: hidden` would turn the body into a scroll container and stop the map and the menu from sticking.
+
+## 11b. Your sounds
+
+The **Your sounds** section has three slots. Each takes an audio or video file chosen from the device, analyses it, and plays it either as the recording or as a synthesised copy. Files are read in the browser with `decodeAudioData`, never uploaded and never stored, so they are gone after a reload. Which video formats work depends on the browser: Chrome, Edge and Safari read MP4 (AAC) and WebM; if a file can't be read, exporting its audio as WAV or MP3 always works.
+
+### Analysis (`analyseAudio`)
+
+At most the first 3 minutes are analysed, mixed to mono and passed through a 40 Hz one-pole high-pass.
+
+- **Onsets.** The signal is pre-emphasised (y[n] = x[n] − 0.95·x[n−1], so transients stand out) and its energy is measured every 5 ms over 10 ms windows. An onset is a rise of at least 6 dB within 20 ms that ends at least 12 dB above the noise floor (the 20th percentile of the energy), with at least 30 ms between onsets.
+- **Events or texture.** The file is treated as separate sounds if there are at least 3 onsets, no more than 20 per second, and the level varies by at least 8 dB (10th to 90th percentile above the floor); otherwise as a continuous texture. The "Treat as" control can override this.
+- **Slices.** Each event runs from 10 ms before its onset until it has fallen 30 dB below its peak, reached the floor or the next onset (at most 0.8 s). Up to 32 of the loudest are kept, each normalised with short fades, and their relative peak levels are stored so playback keeps the original dynamics.
+- **Texture.** The loudest window of up to 10 s is looped with a 0.5 s equal-power crossfade and normalised to the same RMS as the noise colours.
+- **Rhythm.** The gaps between onsets give the rate and their coefficient of variation, CV = σ/μ: below 0.35 steady, around 1 random (a Poisson process has CV = 1), above 1.3 clustered.
+- **Decay.** The median time from each event's peak to 20 dB below it; for an exponential decay with time constant τ this is τ·ln 10.
+- **Spectrum.** Power spectra (4096-point FFT, Hann window) are averaged over the events, or over the texture. From the average come the centroid ("Brightness"), up to three resonances (peaks at least 4 dB above their surroundings within half an octave, at least a third of an octave apart), and a noisiness value. Noisiness is the spectral flatness (geometric over arithmetic mean) in bands of about 1/3 octave, weighted by band energy, and divided by its expected value for noise averaged over M spectra, exp(ψ(M) − ln M), which is 0.56 for M = 1. Measuring within narrow bands keeps an overall tilt, as in brown noise, from counting as tonal. It reads about 1 for noise and about 0 for pure tones.
+
+Checks on known test signals: taps with modes at 700, 1800 and 3000 Hz and τ = 40 ms were measured at 703, 1805 and 3000 Hz with a 95 ms decay (expected 92 ms), onsets within 1.3 ms (median), all 41 events found. White and brown noise gave noisiness 1.00 and 0.96 and were classed as textures, a sine chord 0.00. Three minutes of stereo audio are analysed in well under a second.
+
+### Playing the recording
+
+Events are played with `oneShot` like the other sounds: a random slice, its stored relative level, and small random variations of level and pitch set by "Variation". "Timing" chooses how the gaps are drawn:
+
+- **Like the original** walks through the measured gaps in order, jumping to a random place 15% of the time, so clusters and pauses keep their character.
+- **Random** draws exponential gaps with the measured mean rate.
+- **Steady** uses the mean gap.
+
+"Tempo" divides every gap, and "Pitch" sets the playback rate to 2^(semitones/12). Textures loop the prepared buffer.
+
+### Synthesised copy (`bakeCopy`)
+
+The copy uses only the measurements, none of the recorded audio. Sixteen event variants are rendered offline: a short noise burst (the measured attack, 1–10 ms) excites a bandpass filter at each resonance with Q = π·f·τ, so each rings for the measured decay, with its measured relative level; alongside, a band of noise around the centroid decays over the same time, weighted by the noisiness. Variants are detuned by up to ±4%. The texture copy is 6 s of noise through the resonances and a band at the centroid, looped and normalised. Re-analysing the copy of the tapping test gave resonances of 703, 1793 and 2977 Hz and a 105 ms decay, against 703, 1805 and 3000 Hz and 95 ms for the original.
+
+Because the copy contains no part of the recording, it is the option to use when the original shouldn't be redistributed.
+
+## 11c. Room reverb
+
+A single `ConvolverNode` is shared by all sounds. Each voice has a send gain (its **Reverb** slider) taken after the panner, or after the filter for "All around" sounds, into the reverb input; the reverb output returns into the master gain, so master volume and the sleep fade apply to it too.
+
+The impulse responses are synthesised, not recorded. For each ear, white noise is split with a one-pole filter at 1.8 kHz; the low band decays as exp(−6.91·t/RT60), reaching −60 dB at the room's reverberation time, and the high band twice as fast, because walls and air absorb high frequencies more. The diffuse tail builds up over 8 ms after a pre-delay and is normalised to unit energy, so the wet signal is about as loud as the dry signal for any room; a few discrete early reflections, slightly different in each ear, are added on top.
+
+| Room | RT60 | Pre-delay | Character |
+|---|---|---|---|
+| Small room | 0.5 s | 3 ms | dense early reflections, fairly dark |
+| Bathroom | 1.4 s | 2 ms | bright, hard walls |
+| Concert hall | 2.8 s | 22 ms | long, dark tail |
+| Outdoors | 0.9 s | 10 ms | a few distant reflections, weak and dark tail |
+
+Changing room crossfades from the old convolver to a new one over about 0.2 s. Each impulse response is built once and cached. Per-sound defaults range from 10% (voices, background layers) to 35% (instruments). In a browser check with only the fire on and its reverb at 100%, the total level rose by 3.6 dB with the small room compared with no room.
+
+## 11d. Scenes, sharing and Surprise me
+
+A scene is a plain object: master volume, room, key and scale, the ids of the sounds that are on, every slider and dropdown value that differs from its default (the defaults are recorded when each control is built), and the patterns with their links. Your sounds slots are left out, since their files can't be kept.
+
+`applyScene` turns every sound off, resets every control to its default and then sets the scene's values by writing into the controls and firing their events, so exactly the same code runs as when you change them by hand. It then switches on the scene's sounds and recreates the pattern links; patterns are added to your saved patterns unless an identical one already exists.
+
+Saved mixes are kept in the browser's `localStorage` under `hush.scenes`. A share link carries the scene in the URL fragment (`#s=…`), which is never sent to a server: the scene is written as JSON, patterns are resampled to at most 400 points of one byte each (their original length is stored so they keep their duration), the result is compressed with `CompressionStream('deflate-raw')` where available, and encoded in base64url. A typical mix gives a link of well under a thousand characters. Opening a link applies the mix and removes the fragment from the address bar; the audio starts when Start listening is pressed.
+
+The ready-made scenes are defined in `BUILTIN_SCENES` in the same format. Their patterns can be described by a generator instead of values, for example `{gen:'sine', len:10, lo:0.25, hi:0.75}`.
+
+**Surprise me** picks one or two background layers (noise, rain, fire, pad, crickets) and two or three foreground sounds, spreads the foreground sounds evenly around the head with some jitter, places close-up sounds (mouth, whisper, brushing and similar) 18–48 cm away and the others 0.5–1.7 m away, and gives each a random movement. The room follows the mix: outdoors for animals without instruments, often a hall with instruments, otherwise a small room or bathroom. Key and scale are random too.
+
+**Chaos mode** (a toggle button next to Surprise me) repeats Surprise me at the interval chosen in **Chaos changes**, from 5 s to 5 min (15 s by default), counted on the audio clock so pausing pauses it. The scheduler tick checks the deadline; each change ramps the master gain down over min(1.2 s, interval/5), applies a new surprise scene while it is silent, and ramps back up to the volume slider's level over 1.3 times that. A busy flag stops changes from overlapping. Turning it on before playback starts plays a first mix immediately; turning it off keeps the current mix.
+
+## 11e. Sleep timer, recording, phones
+
+**Sleep timer.** The timer counts listening time on the audio clock, so pausing pauses it. Over the last third of the time, at most 5 minutes, a gain after the master falls exponentially by 60 dB, which sounds like an even fade; when the time is up, `pausePlayback()` runs and the gain is reset. A timer set before playback starts waits for Start listening.
+
+**Recording.** A `MediaStreamAudioDestinationNode` taps the final mix after the compressor, and `MediaRecorder` encodes it: Opus in WebM or Ogg, or AAC in MP4 on Safari, at 192 kbit/s. Stopping downloads a file named with the date and time. Recording pauses and resumes with playback, and its timer follows the audio clock.
+
+**Phones.** A silent, looping `<audio>` element plays alongside the Web Audio graph. It gives the Media Session API a media element to attach to, so play and pause show on the lock screen and in notifications (the handlers call `startPlayback` and `pausePlayback`, and the title is the current scene's name), and on iPhones it lets Web Audio play even when the ring/silent switch is on silent. While the page is hidden, the scheduler looks 2 s ahead instead of 250 ms, because browsers may run timers less often in the background. How long playback continues with the screen off still depends on the browser and the phone's power settings.
+
+**Installable app.** `manifest.webmanifest` and the icons make the page installable, and `sw.js`, a service worker, caches the page and icons so the installed app opens without a connection. The page itself is fetched from the network first, so updates arrive when online. Service workers only run over `http(s)`, so this works on GitHub Pages or a local server, not from a double-clicked file. Where the browser offers it, an **Install app** button appears.
 
 ## 12. The head map
 
