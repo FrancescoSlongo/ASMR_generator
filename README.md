@@ -64,7 +64,7 @@ It works in current versions of Chrome, Edge, Firefox and Safari.
 ## Project layout
 
 ```
-hush/
+ASMR_generator/
 ├── index.html             page markup and the in-app guide
 ├── css/
 │   └── style.css          styles
@@ -88,28 +88,11 @@ hush/
 
 The scripts are ordinary (non-module) scripts sharing one global scope, so the page also runs from a double-clicked file. The technical guide explains the scheduler, every sound, the spatial audio, the analysis of your own files and how to add a new sound: [docs/how-it-works.md](docs/how-it-works.md).
 
-## Publishing on GitHub
+## Live app and updates
 
-The folder is already a git repository with a first commit, so only three steps are left.
+When GitHub Pages is switched on (**Settings → Pages → Deploy from a branch**, branch `main`, folder `/ (root)`), the app is live at **https://francescoslongo.github.io/ASMR_generator/**, where it can also be installed as an app and used offline.
 
-**1. Create an empty repository** called `hush` on github.com, without a README, licence or `.gitignore` (the project already has them, and extra files would make the first push conflict).
-
-**2. Push**, from inside the folder:
-
-```bash
-git remote add origin https://github.com/<your-username>/hush.git
-git push -u origin main
-```
-
-With the GitHub CLI (`gh auth login` first), steps 1 and 2 are a single command:
-
-```bash
-gh repo create hush --public --source=. --push
-```
-
-**3. Turn on GitHub Pages:** in the repository, open **Settings → Pages**, choose **Deploy from a branch**, then the `main` branch and the `/ (root)` folder, and save. After a minute or two the app is live at `https://<your-username>.github.io/hush/`, where it can also be installed as an app.
-
-Later changes follow the usual routine:
+To publish changes from a local copy:
 
 ```bash
 git add .
